@@ -173,8 +173,10 @@ func TestApplySetsEnvAndDirAndClosesStdin(t *testing.T) {
 	if cmd.Stdin != nil {
 		t.Error("stdin must not be inherited by third-party code")
 	}
-	if cmd.Stdout == nil {
-		t.Error("stdout should be redirected, not left to inherit the parent's")
+	// A nil Stdout is exactly right: exec.Cmd routes it to the null device.
+	// Anything non-nil here would mean the child inherited a real descriptor.
+	if cmd.Stdout != nil {
+		t.Errorf("Stdout = %v; want nil so exec routes it to /dev/null", cmd.Stdout)
 	}
 	if !slices.Contains(cmd.Env, "JSINGO_FD=3") {
 		t.Errorf("JSINGO_FD missing from %v", cmd.Env)

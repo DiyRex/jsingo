@@ -9,12 +9,14 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -64,7 +66,11 @@ func startSession(t *testing.T, kind detect.Kind) *session {
 	// node cannot execute TypeScript directly on every supported version, so
 	// the host is transpiled to JS first when running under node.
 	if kind == detect.KindNode {
-		hostEntry, handlers = buildForNode(t, root)
+		built, err := nodeBuild()
+		if err != nil {
+			t.Skipf("node matrix unavailable: %v", err)
+		}
+		hostEntry, handlers = built.host, built.handlers
 	}
 
 	sandboxDir := t.TempDir()
@@ -106,8 +112,20 @@ func startSession(t *testing.T, kind detect.Kind) *session {
 		t.Fatalf("supervisor.New: %v", err)
 	}
 
-	go func() { _ = sup.Run(t.Context()) }()
-	t.Cleanup(sup.Stop)
+	// Wait for Run to return during cleanup. Stop only signals; the
+	// supervision goroutine keeps running - and keeps logging - for a moment
+	// after. Letting the test finish while it is still alive is what produces
+	// "Log in goroutine after test has completed".
+	runDone := make(chan struct{})
+	go func() { defer close(runDone); _ = sup.Run(t.Context()) }()
+	t.Cleanup(func() {
+		sup.Stop()
+		select {
+		case <-runDone:
+		case <-time.After(15 * time.Second):
+			t.Error("supervisor did not shut down within 15s")
+		}
+	})
 
 	var m *wire.Mux
 	select {
@@ -140,37 +158,61 @@ func waitReady(t *testing.T, m *wire.Mux, timeout time.Duration) {
 	t.Fatalf("sidecar not ready after %v: %v", timeout, lastErr)
 }
 
-// buildForNode bundles the host and handlers to plain JS.
+// nodeBuild transpiles the host and handlers to plain JS, once per test
+// binary.
 //
-// Node's TypeScript support varies by version, so rather than gate the whole
-// node matrix on it, bun (already required for development) transpiles ahead
-// of time. This also exercises the bundling path the release build will use.
-func buildForNode(t *testing.T, root string) (host, handlers string) {
-	t.Helper()
+// Node's TypeScript support varies by version, so bun (already required for
+// development) transpiles ahead of time. This also exercises the bundling path
+// the release build uses.
+//
+// Built once, not per session. Running `bun build` per test meant dozens of
+// concurrent invocations contending on bun's shared cache, and one of them
+// wedging took out the whole suite - a test-harness bug that only appeared
+// under -count>1.
+var nodeBuild = sync.OnceValues(func() (nodeArtifacts, error) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return nodeArtifacts{}, errors.New("cannot determine test file path")
+	}
+	root := filepath.Dir(filepath.Dir(file))
 
-	bun, err := detect.Find(t.Context(), detect.WithOrder(detect.KindBun))
+	bun, err := detect.Find(context.Background(), detect.WithOrder(detect.KindBun))
 	if err != nil {
-		t.Skipf("node matrix needs bun to transpile TypeScript: %v", err)
+		return nodeArtifacts{}, fmt.Errorf("node matrix needs bun to transpile TypeScript: %w", err)
 	}
 
-	out := t.TempDir()
-	cmd := exec.CommandContext(t.Context(), bun.Path, "build",
-		filepath.Join(root, "jsruntime", "src", "main.ts"),
-		"--target", "node", "--format", "esm", "--outfile", filepath.Join(out, "host.mjs"))
-	cmd.Dir = root
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bun build host: %v\n%s", err, b)
+	out, err := os.MkdirTemp("", "jsingo-node-build-")
+	if err != nil {
+		return nodeArtifacts{}, err
 	}
 
-	cmd = exec.CommandContext(t.Context(), bun.Path, "build",
-		filepath.Join(root, "integration", "testdata", "handlers.ts"),
-		"--target", "node", "--format", "esm", "--outfile", filepath.Join(out, "handlers.mjs"))
-	cmd.Dir = root
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("bun build handlers: %v\n%s", err, b)
+	build := func(src, dst string) error {
+		// A bounded context: a wedged bundler must fail this build, not
+		// consume the entire test timeout.
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, bun.Path, "build", src,
+			"--target", "node", "--format", "esm", "--outfile", dst)
+		cmd.Dir = root
+		if b, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("bun build %s: %w\n%s", src, err, b)
+		}
+		return nil
 	}
-	return filepath.Join(out, "host.mjs"), filepath.Join(out, "handlers.mjs")
-}
+
+	host := filepath.Join(out, "host.mjs")
+	handlers := filepath.Join(out, "handlers.mjs")
+	if err := build(filepath.Join(root, "jsruntime", "src", "main.ts"), host); err != nil {
+		return nodeArtifacts{}, err
+	}
+	if err := build(filepath.Join(root, "integration", "testdata", "handlers.ts"), handlers); err != nil {
+		return nodeArtifacts{}, err
+	}
+	return nodeArtifacts{host: host, handlers: handlers}, nil
+})
+
+type nodeArtifacts struct{ host, handlers string }
 
 // call is a typed convenience over the mux.
 func call[Out any](t *testing.T, s *session, ctx context.Context, method string, in any) (Out, error) {
@@ -478,12 +520,37 @@ func containsAll(s string, subs ...string) bool {
 // sessionLogger surfaces sidecar stderr in test output, which is the only way
 // to diagnose a host that dies before it can speak the protocol.
 func sessionLogger(t *testing.T) *slog.Logger {
-	return slog.New(slog.NewTextHandler(testLogWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	w := &testLogWriter{t: t}
+	// Registered before the supervisor's own cleanup, so it runs last (LIFO)
+	// and the writer stays live while the supervisor shuts down.
+	t.Cleanup(w.stop)
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-type testLogWriter struct{ t *testing.T }
+// testLogWriter forwards to t.Logf and goes silent once the test is over.
+//
+// The supervisor logs from its own goroutine, so without the guard a line
+// emitted during teardown panics the whole run with "Log in goroutine after
+// test has completed". Discarding late lines is right here: by then the test
+// has its verdict, and a diagnostic must never be able to fail the suite.
+type testLogWriter struct {
+	t    *testing.T
+	mu   sync.Mutex
+	done bool
+}
 
-func (w testLogWriter) Write(p []byte) (int, error) {
-	w.t.Logf("%s", p)
+func (w *testLogWriter) stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.done = true
+}
+
+func (w *testLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return len(p), nil
+	}
+	w.t.Logf("%s", bytes.TrimRight(p, "\n"))
 	return len(p), nil
 }

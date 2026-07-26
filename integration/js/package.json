@@ -1,0 +1,1 @@
+{ "name": "@jsingo/integration-demo", "private": true, "jsingo": { "entry": "demo.ts" } }

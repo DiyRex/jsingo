@@ -181,12 +181,16 @@ func (p Policy) Apply(cmd *exec.Cmd, extra map[string]string) {
 	// it to find there.
 	cmd.Stdin = nil
 
-	// stdout is discarded rather than forwarded. The protocol lives on fd 3,
-	// so nothing of value is written here - only console.log from npm
-	// packages, which must never be able to flood the parent's own output.
-	if cmd.Stdout == nil {
-		cmd.Stdout = os.NewFile(0, os.DevNull)
-	}
+	// stdout is discarded rather than forwarded. The protocol lives on fd 3, so
+	// nothing of value is written here - only console.log from npm packages,
+	// which must never be able to flood the parent's own output.
+	//
+	// Leaving it nil is what discards it: exec.Cmd connects a nil Stdout to
+	// the null device itself. Do not "improve" this to os.NewFile(0,
+	// os.DevNull) - that does not open /dev/null, it wraps descriptor 0, the
+	// parent's stdin, and merely labels it. The child then writes to the
+	// parent's stdin and closing it corrupts the parent's descriptor.
+	cmd.Stdout = nil
 }
 
 // HardenArgs returns extra runtime flags that reduce the sidecar's capability.
