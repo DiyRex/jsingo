@@ -51,8 +51,9 @@ type Runtime struct {
 	closed   atomic.Bool
 	stopped  atomic.Bool
 
-	workDir  string
-	entryArg string
+	workDir string
+	// entries are the module entrypoints handed to the host, one per module.
+	entries []string
 
 	calls  atomic.Int64
 	failed atomic.Int64
@@ -84,19 +85,19 @@ func New(ctx context.Context, opts ...Option) (*Runtime, error) {
 		return nil, err
 	}
 
-	workDir, entryArg, err := materialize(cfg)
+	lay, err := materialize(cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	r := &Runtime{
-		cfg:      cfg,
-		rt:       rt,
-		ready:    make(chan struct{}),
-		runDone:  make(chan struct{}),
-		workDir:  workDir,
-		entryArg: entryArg,
-		sem:      make(chan struct{}, inFlightLimit(cfg)),
+		cfg:     cfg,
+		rt:      rt,
+		ready:   make(chan struct{}),
+		runDone: make(chan struct{}),
+		workDir: lay.dir,
+		entries: lay.entries,
+		sem:     make(chan struct{}, inFlightLimit(cfg)),
 	}
 
 	sup, err := supervisor.New(supervisor.Config{
@@ -167,13 +168,13 @@ func inFlightLimit(cfg *config) int {
 // Keying on content means identical modules are written once and shared across
 // restarts and processes, while changed content can never reuse a stale
 // directory.
-func materialize(cfg *config) (dir, entry string, err error) {
+func materialize(cfg *config) (*layout, error) {
 	h := sha256.New()
 	h.Write(hostsrc.Bundle)
 	for _, m := range cfg.modules {
 		mh, err := m.hash()
 		if err != nil {
-			return "", "", err
+			return nil, err
 		}
 		fmt.Fprintf(h, "%s:%s\x00", m.name, mh)
 	}
@@ -187,28 +188,33 @@ func materialize(cfg *config) (dir, entry string, err error) {
 		}
 		base = filepath.Join(userCache, "jsingo")
 	}
-	dir = filepath.Join(base, key)
+	dir := filepath.Join(base, key)
 
 	// 0700: the extracted tree is executable code, and nothing outside this
 	// user has any reason to read or modify it.
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", "", fmt.Errorf("jsingo: create cache dir: %w", err)
+		return nil, fmt.Errorf("jsingo: create cache dir: %w", err)
 	}
 
 	hostPath := filepath.Join(dir, hostsrc.Name)
 	if err := writeIfChanged(hostPath, hostsrc.Bundle, 0o500); err != nil {
-		return "", "", err
+		return nil, err
 	}
 
-	// Only the first module's entry is passed today; multi-module merging is
-	// the bundler's job and lands with `jsingo build`.
-	first := cfg.modules[0]
+	entries := make([]string, 0, len(cfg.modules))
 	for _, m := range cfg.modules {
 		if err := extractModule(dir, m); err != nil {
-			return "", "", err
+			return nil, err
 		}
+		entries = append(entries, filepath.Join(dir, filepath.FromSlash(m.entry)))
 	}
-	return dir, filepath.Join(dir, filepath.FromSlash(first.entry)), nil
+	return &layout{dir: dir, entries: entries}, nil
+}
+
+// layout is where the host and the module files were written.
+type layout struct {
+	dir     string
+	entries []string
 }
 
 func extractModule(dir string, m *Mod) error {
@@ -285,7 +291,10 @@ func (r *Runtime) spawn(ctx context.Context, childFD int) (*exec.Cmd, error) {
 	hostPath := filepath.Join(r.workDir, hostsrc.Name)
 
 	args := sandbox.HardenArgs(string(r.rt.Kind), r.cfg.maxHeapMB)
-	args = append(args, hostPath, r.entryArg)
+	// Every module entry is passed; the host imports each and merges their
+	// exports into one method table.
+	args = append(args, hostPath)
+	args = append(args, r.entries...)
 	cmd := exec.CommandContext(ctx, r.rt.Path, args...)
 
 	policy := r.cfg.sandbox
