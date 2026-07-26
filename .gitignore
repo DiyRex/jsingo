@@ -1,0 +1,31 @@
+# internal planning / docs — not published
+docs/
+*.plan.md
+PLAN.md
+
+# Go
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.*
+vendor/
+.go-build/
+
+# generated bundles & embeds
+bundle_gen.go
+*.gen.d.ts
+
+# JS runtime
+node_modules/
+.bun/
+*.tsbuildinfo
+
+# local env / tooling
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
