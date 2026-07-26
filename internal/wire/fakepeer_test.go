@@ -38,7 +38,7 @@ func newPipePeer(t *testing.T, h func(p *fakePeer, id uint64, method string, bod
 	// that writes before reading. A real socketpair matches production.
 	c1, c2 := socketPair(t)
 
-	m := NewMux(NewReader(c1, 0), NewWriter(c1, 0), nil)
+	m := NewMux(NewReader(c1, 0), NewWriter(c1, 0), MuxOptions{})
 	p := &fakePeer{
 		t:         t,
 		r:         NewReader(c2, 0),

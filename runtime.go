@@ -304,7 +304,12 @@ func (r *Runtime) serve(_ context.Context, conn io.ReadWriteCloser) error {
 	m := wire.NewMux(
 		wire.NewReader(conn, r.cfg.maxFrameSize),
 		wire.NewWriter(conn, r.cfg.maxFrameSize),
-		r.onLog,
+		wire.MuxOptions{
+			Log:              r.onLog,
+			MaxReplyBytes:    r.cfg.maxReplyBytes,
+			LogRatePerSecond: wire.DefaultLogRate,
+			LogBurst:         wire.DefaultLogBurst,
+		},
 	)
 	r.mux.Store(m)
 	r.readyOnce.Do(func() { close(r.ready) })

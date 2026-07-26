@@ -23,6 +23,9 @@ type Mux struct {
 	r   *Reader
 	log func(Frame)
 
+	maxReply int
+	logLimit *rateLimiter
+
 	// nextID is odd-incremented from 1. Zero is reserved for LOG frames, so a
 	// zero id in a reply is always a peer bug rather than a real call.
 	nextID atomic.Uint64
@@ -49,6 +52,8 @@ var (
 	ErrClosed = errors.New("wire: mux closed")
 	// ErrProtocol means the peer violated the protocol.
 	ErrProtocol = errors.New("wire: protocol violation")
+	// ErrReplyTooLarge means a reply exceeded the configured reply limit.
+	ErrReplyTooLarge = errors.New("wire: reply too large")
 )
 
 // CallError is a structured failure reported by the peer via an ERROR frame.
@@ -71,18 +76,48 @@ func (e *CallError) Is(target error) bool {
 	return ok && t.Code == e.Code && t.Message == ""
 }
 
-// NewMux returns a Mux over r and w. Log receives LOG frames from the peer; a
-// nil log drops them. Log is called on the read goroutine, so it must not
-// block.
-func NewMux(r *Reader, w *Writer, log func(Frame)) *Mux {
+// MuxOptions configures a Mux.
+type MuxOptions struct {
+	// Log receives LOG frames from the peer. It runs on the read goroutine,
+	// so it must not block. A nil Log drops them.
+	Log func(Frame)
+
+	// MaxReplyBytes caps a single reply payload, separately from the frame
+	// size limit. Requests are often large - a document to parse - while
+	// replies should not be, and one limit for both means a tiny request can
+	// elicit a maximal reply. Zero means the frame limit is the only bound.
+	MaxReplyBytes int
+
+	// LogRatePerSecond and LogBurst bound LOG frames. Zero disables limiting.
+	LogRatePerSecond int
+	LogBurst         int
+}
+
+// DefaultLogRate and DefaultLogBurst bound sidecar logging.
+//
+// Generous for real diagnostics, far below what a flooding peer produces.
+const (
+	DefaultLogRate  = 200
+	DefaultLogBurst = 500
+)
+
+// NewMux returns a Mux over r and w.
+func NewMux(r *Reader, w *Writer, opts MuxOptions) *Mux {
 	return &Mux{
-		w:       w,
-		r:       r,
-		log:     log,
-		pending: make(map[uint64]chan<- result),
-		done:    make(chan struct{}),
+		w:        w,
+		r:        r,
+		log:      opts.Log,
+		maxReply: opts.MaxReplyBytes,
+		logLimit: newRateLimiter(opts.LogRatePerSecond, opts.LogBurst),
+		pending:  make(map[uint64]chan<- result),
+		done:     make(chan struct{}),
 	}
 }
+
+// DroppedLogs reports how many LOG frames the rate limiter refused.
+//
+// Surfaced so a gap in the log reads as a gap rather than as silence.
+func (m *Mux) DroppedLogs() int64 { return m.logLimit.Dropped() }
 
 // Serve reads frames until the connection ends or Close is called, routing
 // each to its waiting caller. It returns the error that stopped it, or nil
@@ -107,12 +142,23 @@ func (m *Mux) readLoop() error {
 
 		switch f.Type {
 		case TypeReply, TypeError:
+			if m.maxReply > 0 && f.Type == TypeReply && len(f.Payload) > m.maxReply {
+				// Fail the one call rather than the connection: an oversized
+				// reply is a handler returning too much, not a broken peer.
+				m.deliver(f.ID, result{err: fmt.Errorf(
+					"%w: reply of %d bytes exceeds the %d byte limit",
+					ErrReplyTooLarge, len(f.Payload), m.maxReply)})
+				continue
+			}
 			// Clone before handing off: the payload aliases the Reader's
 			// buffer, which the next iteration overwrites.
 			m.deliver(f.ID, result{frame: f.Clone()})
 
 		case TypeLog:
-			if m.log != nil {
+			// Rate-limited: a peer emitting log frames faster than the parent
+			// can format them would otherwise grow the Go process without
+			// bound. Diagnostics are best-effort; dropping is correct.
+			if m.log != nil && m.logLimit.allow() {
 				m.log(f)
 			}
 

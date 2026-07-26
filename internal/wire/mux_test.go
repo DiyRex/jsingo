@@ -351,7 +351,7 @@ func TestMuxRejectsClientFramesFromPeer(t *testing.T) {
 			c1, c2 := socketPair(t)
 			t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
 
-			m := NewMux(NewReader(c1, 0), NewWriter(c1, 0), nil)
+			m := NewMux(NewReader(c1, 0), NewWriter(c1, 0), MuxOptions{})
 			serveErr := make(chan error, 1)
 			go func() { serveErr <- m.Serve() }()
 
@@ -383,8 +383,8 @@ func TestMuxRoutesLogFrames(t *testing.T) {
 	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
 
 	logs := make(chan []byte, 4)
-	m := NewMux(NewReader(c1, 0), NewWriter(c1, 0), func(f Frame) {
-		logs <- append([]byte(nil), f.Payload...)
+	m := NewMux(NewReader(c1, 0), NewWriter(c1, 0), MuxOptions{
+		Log: func(f Frame) { logs <- append([]byte(nil), f.Payload...) },
 	})
 	go func() { _ = m.Serve() }()
 	t.Cleanup(func() { _ = m.Close() })

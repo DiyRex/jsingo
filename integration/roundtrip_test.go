@@ -97,11 +97,13 @@ func startSession(t *testing.T, kind detect.Kind) *session {
 			m := wire.NewMux(
 				wire.NewReader(conn, 0),
 				wire.NewWriter(conn, 0),
-				func(f wire.Frame) {
-					select {
-					case logs <- string(f.Payload):
-					default: // never block the read loop on a slow test
-					}
+				wire.MuxOptions{
+					Log: func(f wire.Frame) {
+						select {
+						case logs <- string(f.Payload):
+						default: // never block the read loop on a slow test
+						}
+					},
 				},
 			)
 			muxOnce.Do(func() { ready <- m })

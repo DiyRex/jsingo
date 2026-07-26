@@ -43,8 +43,9 @@ type config struct {
 	heartbeatInterval time.Duration
 	heartbeatTimeout  time.Duration
 
-	maxFrameSize uint32
-	maxInFlight  int
+	maxFrameSize  uint32
+	maxReplyBytes int
+	maxInFlight   int
 
 	cacheDir string
 }
@@ -225,6 +226,16 @@ func WithHeartbeat(interval, timeout time.Duration) Option {
 // go, so it should be set to the largest legitimate payload and no more.
 func WithMaxFrameSize(n uint32) Option {
 	return func(c *config) { c.maxFrameSize = n }
+}
+
+// WithMaxReplyBytes caps a single reply payload.
+//
+// Separate from WithMaxFrameSize because the two limits protect different
+// things. Requests are legitimately large - a document to parse - while
+// replies usually are not, and a single shared limit lets a tiny request
+// elicit a maximal reply from a compromised sidecar.
+func WithMaxReplyBytes(n int) Option {
+	return func(c *config) { c.maxReplyBytes = n }
 }
 
 // WithMaxInFlight caps concurrent calls to the sidecar.
