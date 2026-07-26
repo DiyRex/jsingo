@@ -32,3 +32,4 @@ node_modules/
 
 # JS runtime
 jsruntime/node_modules/
+examples/*/js/node_modules/
