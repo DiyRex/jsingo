@@ -238,3 +238,100 @@ func BenchmarkParseArticle(b *testing.B) {
 		}
 	}
 }
+
+// --- performance breakdown -------------------------------------------------
+//
+// Where the time in a full extraction actually goes. Optimising before knowing
+// this would mean tuning the 3% and leaving the 97% alone.
+
+func benchRuntime(b *testing.B) *jsingo.Runtime {
+	b.Helper()
+	rt, err := jsingo.New(b.Context(),
+		jsingo.WithModule(readability.Module),
+		jsingo.WithCacheDir(b.TempDir()),
+		jsingo.WithStartupTimeout(60*time.Second),
+	)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = rt.Close(ctx)
+	})
+	return rt
+}
+
+// Transport plus serialisation only: an empty request and an empty reply.
+func BenchmarkOverheadNoop(b *testing.B) {
+	rt := benchRuntime(b)
+	noop := jsingo.Bind[struct{}, struct{ OK bool }](rt, readability.Module, "noop")
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := noop(context.Background(), struct{}{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Adds the cost of shipping the document across the boundary, without any DOM
+// work, by sending the HTML to a handler that ignores it.
+func BenchmarkOverheadWithPayload(b *testing.B) {
+	rt := benchRuntime(b)
+	noop := jsingo.Bind[readability.ParseRequest, struct{ OK bool }](rt, readability.Module, "noop")
+	req := readability.ParseRequest{HTML: articlePage, URL: "https://example.com/x"}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := noop(context.Background(), req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Adds linkedom's DOM construction.
+func BenchmarkDOMOnly(b *testing.B) {
+	rt := benchRuntime(b)
+	parse := jsingo.Bind[readability.ParseRequest, struct{ Nodes int }](rt, readability.Module, "parseOnly")
+	req := readability.ParseRequest{HTML: articlePage, URL: "https://example.com/x"}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := parse(context.Background(), req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// The full extraction: DOM plus Readability plus a reply carrying both the
+// cleaned HTML and the plain text.
+func BenchmarkFullExtraction(b *testing.B) {
+	rt := benchRuntime(b)
+	c := readability.New(rt)
+	req := readability.ParseRequest{HTML: articlePage, URL: "https://example.com/x"}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := c.Parse(context.Background(), req); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Throughput under concurrency. JavaScript is single-threaded, so this shows
+// what one sidecar can actually sustain regardless of how many goroutines call.
+func BenchmarkFullExtractionParallel(b *testing.B) {
+	rt := benchRuntime(b)
+	c := readability.New(rt)
+	req := readability.ParseRequest{HTML: articlePage, URL: "https://example.com/x"}
+
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := c.Parse(context.Background(), req); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

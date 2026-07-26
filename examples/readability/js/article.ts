@@ -101,3 +101,30 @@ export function isReaderable(req: ParseRequest): { readerable: boolean } {
   if (!req?.html) throw new InvalidArgument("html is required");
   return { readerable: isProbablyReaderable(buildDocument(req.html, req.url)) };
 }
+
+/**
+ * Returns immediately. Exists so a benchmark can separate transport and
+ * serialisation cost from the cost of the JavaScript work itself.
+ */
+export function noop(): { ok: boolean } {
+  return { ok: true };
+}
+
+/** Builds the DOM and stops, isolating linkedom's share of the work. */
+export function parseOnly(req: ParseRequest): { nodes: number } {
+  const doc = buildDocument(req.html, req.url);
+  return { nodes: doc.querySelectorAll("*").length };
+}
+
+/**
+ * Extracts plain text only, omitting the cleaned HTML.
+ *
+ * The `content` field is usually the largest thing in the reply and often goes
+ * unread - an LLM context or a search index wants `textContent`. Not
+ * serialising it is the cheapest win available to a caller.
+ */
+export function parseText(req: ParseRequest): Omit<ParseResponse, "content"> {
+  const full = parseArticle(req);
+  const { content: _content, ...rest } = full;
+  return rest;
+}
