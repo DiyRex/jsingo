@@ -1,0 +1,116 @@
+# High-isolation deployment: the sidecar in its own container.
+#
+# ---------------------------------------------------------------------------
+# IMPORTANT: this topology requires a transport jsingo does not yet implement.
+#
+# The default transport is an anonymous socketpair created before fork, which
+# only works when parent and child are the same process tree. Two containers
+# are separate process trees, so they must share a Unix domain socket on an
+# emptyDir volume instead. That transport is planned (internal/transport keeps
+# the seam) but is NOT built yet. Treat this file as the target design and the
+# reason the seam exists, not as something to apply today.
+# ---------------------------------------------------------------------------
+#
+# What the extra container buys, and what it costs:
+#
+#   + Separate uid, so a compromised dependency cannot read the Go process's
+#     memory via /proc, signal it, or write its files.
+#   + Its own memory and CPU limits, so a runaway sidecar is OOM-killed
+#     without taking the Go app with it.
+#   + Its own securityContext and seccomp profile.
+#   + Restartable independently of the app.
+#
+#   - The Go supervisor no longer owns the process lifecycle; the kubelet does.
+#     Crash-loop policy, backoff and the parent-death guarantee all move to
+#     Kubernetes, and jsingo's own supervision is bypassed.
+#   - A socket file on a shared volume brings back the stale-socket and
+#     readiness-polling problems the socketpair design removed.
+#   - Slower: a UDS on an emptyDir is still fast, but startup coordination
+#     between containers is not free.
+#
+# Use it when the workload runs genuinely untrusted or high-risk npm code.
+# For ordinary well-known dependencies, the single-container form plus a
+# read-only rootfs and a NetworkPolicy is the better trade.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jsingo-app-isolated
+  labels: { app: jsingo-app-isolated }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: jsingo-app-isolated }
+  template:
+    metadata:
+      labels: { app: jsingo-app-isolated }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+
+      containers:
+        - name: app
+          image: ghcr.io/diyrex/jsingo-app@sha256:REPLACE_WITH_DIGEST
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: JSINGO_TRANSPORT, value: "unix" }
+            - { name: JSINGO_SOCKET,    value: "/ipc/jsingo.sock" }
+          resources:
+            requests: { cpu: "500m", memory: "256Mi" }
+            limits:   { cpu: "2000m", memory: "256Mi" }
+          volumeMounts:
+            - { name: ipc, mountPath: /ipc }
+            - { name: tmp, mountPath: /tmp }
+
+        - name: sidecar
+          image: ghcr.io/diyrex/jsingo-sidecar@sha256:REPLACE_WITH_DIGEST
+          securityContext:
+            # A different uid from the app. This is the entire point of the
+            # topology: the two processes can no longer reach each other except
+            # through the socket.
+            runAsUser: 10002
+            runAsGroup: 10002
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: JSINGO_SOCKET, value: "/ipc/jsingo.sock" }
+          resources:
+            # Sized for the JS heap. Being a separate cgroup is what stops a
+            # memory-hungry dependency from evicting the Go process.
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
+          volumeMounts:
+            - { name: ipc,     mountPath: /ipc }
+            - { name: sandbox, mountPath: /sandbox }
+
+      volumes:
+        - name: ipc
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        - name: sandbox
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jsingo-isolated-egress
+spec:
+  podSelector:
+    matchLabels: { app: jsingo-app-isolated }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }

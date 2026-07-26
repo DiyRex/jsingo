@@ -1,0 +1,40 @@
+# Local and staging equivalent of the Kubernetes manifests.
+#
+# The security options mirror deploy/k8s-single-container.yaml so a control
+# verified here behaves the same in the cluster.
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args: { VERSION: "${VERSION:-dev}" }
+    read_only: true                 # matches readOnlyRootFilesystem
+    security_opt:
+      - no-new-privileges:true      # matches allowPrivilegeEscalation: false
+    cap_drop: [ALL]
+    user: "10001:10001"
+    tmpfs:
+      - /sandbox:mode=0700,size=64m,noexec,nosuid,nodev
+      - /tmp:mode=1777,size=64m,noexec,nosuid,nodev
+    mem_limit: 512m
+    pids_limit: 128                 # caps fork bombs from a dependency
+    environment:
+      NODE_ENV: production
+      DO_NOT_TRACK: "1"
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/app", "-healthcheck"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+    # Default-deny egress is not expressible in compose. For a staging
+    # environment that must model production egress rules, put the service on
+    # an internal network and route outbound traffic through an explicit proxy.
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+    internal: true    # no route to the host network or the metadata endpoint

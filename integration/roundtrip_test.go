@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -24,6 +23,7 @@ import (
 	"time"
 
 	"github.com/DiyRex/jsingo/internal/detect"
+	"github.com/DiyRex/jsingo/internal/sandbox"
 	"github.com/DiyRex/jsingo/internal/supervisor"
 	"github.com/DiyRex/jsingo/internal/wire"
 )
@@ -67,6 +67,7 @@ func startSession(t *testing.T, kind detect.Kind) *session {
 		hostEntry, handlers = buildForNode(t, root)
 	}
 
+	sandboxDir := t.TempDir()
 	logs := make(chan string, 256)
 	ready := make(chan *wire.Mux, 1)
 	var muxOnce sync.Once
@@ -75,7 +76,14 @@ func startSession(t *testing.T, kind detect.Kind) *session {
 		Logger: sessionLogger(t),
 		Spawn: func(ctx context.Context, childFD int) (*exec.Cmd, error) {
 			cmd := rt.Command(ctx, hostEntry, handlers)
-			cmd.Env = append(os.Environ(), fmt.Sprintf("JSINGO_FD=%d", childFD))
+			// Deny-by-default: the sidecar gets a minimal synthetic
+			// environment, never the parent's. See internal/sandbox.
+			policy := sandbox.Policy{Dir: sandboxDir}
+			policy.Apply(cmd, map[string]string{
+				"JSINGO_FD": fmt.Sprint(childFD),
+			})
+			// The runtime and handler entrypoints are read from the repo, so
+			// the process still needs to start there.
 			cmd.Dir = root
 			return cmd, nil
 		},

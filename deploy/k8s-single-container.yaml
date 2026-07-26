@@ -1,0 +1,111 @@
+# Baseline deployment: Go and the sidecar in one container.
+#
+# Suits most workloads. The sidecar is a child process of the Go app and is
+# confined by the pod's securityContext, which applies to every process in the
+# container. For stronger isolation - a separate uid, its own memory limit, its
+# own network policy - see k8s-two-container.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jsingo-app
+  labels: { app: jsingo-app }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: jsingo-app }
+  template:
+    metadata:
+      labels: { app: jsingo-app }
+    spec:
+      automountServiceAccountToken: false   # the SA token is a credential the
+                                            # sidecar has no reason to reach
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+
+      containers:
+        - name: app
+          image: ghcr.io/diyrex/jsingo-app@sha256:REPLACE_WITH_DIGEST
+          imagePullPolicy: IfNotPresent
+
+          securityContext:
+            allowPrivilegeEscalation: false   # blocks setuid binaries, so a
+                                              # sidecar exploit cannot escalate
+            readOnlyRootFilesystem: true      # no persistence, no self-patching
+            capabilities: { drop: ["ALL"] }
+            runAsNonRoot: true
+
+          resources:
+            # Requests and limits are equal so the pod is Guaranteed QoS and
+            # cannot be evicted under node pressure caused by another tenant.
+            #
+            # The memory limit is the real defence against a runaway or
+            # deliberately allocating dependency: cgroups enforce it, unlike
+            # any flag passed to the JS runtime.
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits:   { cpu: "2000m", memory: "512Mi" }
+
+          volumeMounts:
+            # readOnlyRootFilesystem needs writable scratch mounted explicitly.
+            # Both are noexec: code written here cannot then be run.
+            - { name: sandbox, mountPath: /sandbox }
+            - { name: tmp,     mountPath: /tmp }
+
+          livenessProbe:
+            # Reports unhealthy when the sidecar is in a crash loop, so the
+            # orchestrator restarts the pod rather than serving errors forever.
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            # Distinct from liveness: this fails while the sidecar is
+            # restarting, pulling the pod out of the load balancer for the few
+            # hundred milliseconds a respawn takes instead of dropping requests.
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 2
+
+          startupProbe:
+            # The sidecar's first boot is the slowest. A startup probe gives it
+            # room without loosening the liveness threshold afterwards.
+            httpGet: { path: /readyz, port: 8080 }
+            failureThreshold: 30
+            periodSeconds: 2
+
+      volumes:
+        - name: sandbox
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+
+      terminationGracePeriodSeconds: 30   # must exceed the supervisor's
+                                          # ShutdownGrace so SIGTERM ->
+                                          # SIGKILL completes in-pod
+---
+# Default-deny egress. Without this, a compromised dependency can reach the
+# cloud metadata endpoint and take the node's IAM role.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jsingo-app-egress
+spec:
+  podSelector:
+    matchLabels: { app: jsingo-app }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Add the specific services this app legitimately calls. Everything else,
+    # including 169.254.169.254, is denied by omission.

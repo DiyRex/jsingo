@@ -1,0 +1,23 @@
+# Never ship or send to the build context
+.git
+.github
+docs
+*.md
+!README.md
+
+# Must never enter the image: install-time artifacts are rebuilt inside the
+# build stage with --ignore-scripts. Copying a local node_modules would import
+# whatever ran on a developer laptop.
+**/node_modules
+**/.bun
+
+# Build output and local state
+bin
+dist
+coverage.*
+*.test
+.env
+.env.*
+.DS_Store
+.idea
+.vscode
