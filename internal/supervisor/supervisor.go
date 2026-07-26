@@ -310,11 +310,7 @@ func (s *Supervisor) terminate(cmd *exec.Cmd) error {
 	}
 	pid := cmd.Process.Pid
 
-	// Signal the group, not the process, so a JS worker thread or a spawned
-	// grandchild does not survive as an orphan.
-	if err := signalGroup(pid, syscall.SIGTERM); err != nil && !isProcessGone(err) {
-		s.cfg.Logger.Debug("SIGTERM to process group failed", "pid", pid, "error", err)
-	}
+	s.signal(pid, syscall.SIGTERM)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -325,11 +321,33 @@ func (s *Supervisor) terminate(cmd *exec.Cmd) error {
 	case <-time.After(s.cfg.ShutdownGrace):
 		s.cfg.Logger.Warn("sidecar ignored SIGTERM; sending SIGKILL",
 			"pid", pid, "grace", s.cfg.ShutdownGrace)
-		if err := signalGroup(pid, syscall.SIGKILL); err != nil && !isProcessGone(err) {
-			s.cfg.Logger.Error("SIGKILL failed", "pid", pid, "error", err)
-		}
+		s.signal(pid, syscall.SIGKILL)
 		return <-done
 	}
+}
+
+// signal delivers sig to the child's process group, falling back to the
+// process alone.
+//
+// The group is tried first so a JS worker thread or spawned grandchild cannot
+// survive as an orphan. But group delivery can fail with EPERM once the group
+// is being torn down - observed on macOS during normal shutdown - and it would
+// be wrong to conclude from that that the child is unreachable. Falling back
+// to the pid keeps termination reliable; only if both fail is anything logged.
+func (s *Supervisor) signal(pid int, sig syscall.Signal) {
+	groupErr := signalGroup(pid, sig)
+	if groupErr == nil || isProcessGone(groupErr) {
+		return
+	}
+
+	err := syscall.Kill(pid, sig)
+	if err == nil || isProcessGone(err) {
+		s.cfg.Logger.Debug("signalled process directly after group delivery failed",
+			"pid", pid, "signal", sig, "group_error", groupErr)
+		return
+	}
+	s.cfg.Logger.Warn("could not signal sidecar",
+		"pid", pid, "signal", sig, "group_error", groupErr, "process_error", err)
 }
 
 // pumpStderr forwards the sidecar's stderr to the logger and returns the last

@@ -29,3 +29,6 @@ node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# JS runtime
+jsruntime/node_modules/

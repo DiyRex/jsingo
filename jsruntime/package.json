@@ -1,0 +1,22 @@
+{
+  "name": "@jsingo/host",
+  "version": "0.1.0",
+  "description": "Sidecar host for jsingo: speaks the framed protocol on an inherited descriptor and dispatches to exported functions.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    ".": "./src/host.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "bun-types": "^1.3.14",
+    "typescript": "^5.5.0"
+  }
+}
