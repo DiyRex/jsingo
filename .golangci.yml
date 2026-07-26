@@ -1,0 +1,42 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint     # errors.Is/As correctness - the module promises this
+    - copyloopvar
+    - misspell
+    - nilerr
+    - prealloc
+    - unconvert
+    - wastedassign
+    - gosec
+    - revive
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gosec:
+      excludes:
+        - G304  # file reads by path are the point of bundle extraction
+    revive:
+      rules:
+        - name: exported
+          arguments: ["checkPrivateReceivers"]
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, prealloc, errcheck]
+
+formatters:
+  enable:
+    - gofmt
