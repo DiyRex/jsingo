@@ -59,3 +59,20 @@ clean:
 help:
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n",$$1,$$2}'
+
+.PHONY: host
+host: ## rebuild the embedded JS host from jsruntime/
+	cd jsruntime && bun install --frozen-lockfile --ignore-scripts
+	bun build jsruntime/src/main.ts --target=bun --minify \
+		--outfile=internal/hostsrc/dist/host.js
+	@echo "rebuilt internal/hostsrc/dist/host.js"
+
+.PHONY: host-check
+host-check: ## fail if the committed host bundle is stale
+	@cp internal/hostsrc/dist/host.js /tmp/host.committed.js
+	@$(MAKE) -s host >/dev/null
+	@if ! cmp -s /tmp/host.committed.js internal/hostsrc/dist/host.js; then \
+		echo "internal/hostsrc/dist/host.js is stale; run 'make host' and commit"; \
+		exit 1; \
+	fi
+	@echo "embedded host bundle is current"

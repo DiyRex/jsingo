@@ -205,9 +205,12 @@ func HardenArgs(kind string, maxHeapMB int) []string {
 		args := []string{
 			// Removes eval and new Function. A large fraction of obfuscated
 			// npm payloads stage themselves through one of the two.
+			//
+			// Verified in effect on node and NOT on bun, which has no
+			// equivalent. Only flags confirmed against a real runtime belong
+			// here: node rejects unknown flags outright and refuses to start,
+			// so a speculative addition is a crash loop, not a no-op.
 			"--disallow-code-generation-from-strings",
-			// No implicit loading of code from $NODE_OPTIONS or the cwd.
-			"--no-experimental-fetch",
 		}
 		if maxHeapMB > 0 {
 			args = append(args, fmt.Sprintf("--max-old-space-size=%d", maxHeapMB))
